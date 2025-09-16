@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from scipy.integrate import odeint
 import scipy.optimize
 
+from scipy import interpolate
+
 import pybounds
 
 ############################################################################################
@@ -17,238 +19,289 @@ Iyy = 0.02 # moment of inertia (e.g. 1/12*m*L**2 for a solid rod, as an approxim
 ############################################################################################
 # continuos time dynamics function
 ############################################################################################
-def f(x_vec, u_vec, m=m, g=g, L=L, I=Iyy, return_state_names=False):
-    """
-    Continuous time dynamics function for the system shown in the equation.
-    
-    Parameters:
-    x_vec : array-like, shape (7,)
-        State vector [θ, θ̇, x, ẋ, z, ż, k]
-    u_vec : array-like, shape (2,)
-        Control vector [j1, j2]
-    L : float, default 0.5
-        drone arm length
-    m : float, default 1.0
-        drone mass
-    g : float, default 9.81
-        Gravitational acceleration
-    
-    Returns:
-    x_dot : numpy array, shape (7,)
-        Time derivative of state vector
-    """
+class F(object):
+    def __init__(self, k=None):
+        self.k = k
 
-    if return_state_names:
-        return ['theta', 'theta_dot', 'x', 'x_dot', 'z', 'z_dot', 'k']
-    
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+    def f(self, x_vec, u_vec, m=m, g=g, L=L, I=Iyy, return_state_names=False):
+        """
+        Continuous time dynamics function for the system shown in the equation.
+        
+        Parameters:
+        x_vec : array-like, shape (7,)
+            State vector [θ, θ̇, x, ẋ, z, ż, k]
+        u_vec : array-like, shape (2,)
+            Control vector [j1, j2]
+        L : float, default 0.5
+            drone arm length
+        m : float, default 1.0
+            drone mass
+        g : float, default 9.81
+            Gravitational acceleration
+        k : float, default None
+            motor control coefficient, None means that it is part of the state, if a value is specified, then it is not part of the state
+        
+        Returns:
+        x_dot : numpy array, shape (7,)
+            Time derivative of state vector
+        """
+        k = self.k
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
-    
-    # f0 component: drift dynamics (no controls)
-    f0_contribution = np.array([ theta_dot, 
-                                 0, 
-                                 x_dot, 
-                                 0, 
-                                 z_dot, 
-                                 -g / m, 
-                                 0])
-    
-    # f1 component: multiplied by control j1
-    f1_contribution = j1 * np.array([0, 
-                                     L*k/Iyy, 
+        if x_vec is not None:
+            if k is None:
+                assert len(x_vec) == 7
+            elif k is not None:
+                assert len(x_vec) == 6
+
+        if return_state_names:
+            if k is None:
+                return ['theta', 'theta_dot', 'x', 'x_dot', 'z', 'z_dot', 'k']
+            else:
+                return ['theta', 'theta_dot', 'x', 'x_dot', 'z', 'z_dot']
+        
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if k is None:
+            k = x_vec[6]
+
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
+        
+        # f0 component: drift dynamics (no controls)
+        f0_contribution = np.array([ theta_dot, 
                                      0, 
+                                     x_dot, 
                                      0, 
-                                     0, 
-                                     0, 
+                                     z_dot, 
+                                     -g / m, 
                                      0])
-    
-    # f2 component: multiplied by control j2
-    f2_contribution = j2 * np.array([0,
-                                     0,
-                                     0,
-                                     -k * np.sin(theta) / m,
-                                     0,
-                                     k * np.cos(theta) / m,
-                                     0])
+        
+        # f1 component: multiplied by control j1
+        f1_contribution = j1 * np.array([0, 
+                                         L*k/Iyy, 
+                                         0, 
+                                         0, 
+                                         0, 
+                                         0, 
+                                         0])
+        
+        # f2 component: multiplied by control j2
+        f2_contribution = j2 * np.array([0,
+                                         0,
+                                         0,
+                                         -k * np.sin(theta) / m,
+                                         0,
+                                         k * np.cos(theta) / m,
+                                         0])
 
-    # combined dynamics
-    x_dot_vec = f0_contribution + f1_contribution + f2_contribution
-    
-    return x_dot_vec
+        # combined dynamics
+        x_dot_vec = f0_contribution + f1_contribution + f2_contribution
+        
+        if k is None:
+            return x_dot_vec
+        else:
+            return x_dot_vec[0:6]
 
 
 ############################################################################################
 # continuous time measurement functions
 ############################################################################################
-def h_gps(x_vec, u_vec, return_measurement_names=False):
-    if return_measurement_names:
-        return ['theta', 'x', 'z', 'k']
+class H(object):
+    def __init__(self, measurement_option, k=None):
+        self.k = k 
+        self.measurement_option = measurement_option
 
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+    def h(self, x_vec, u_vec, return_measurement_names=False):
+        h_func = self.__getattribute__(self.measurement_option)
+        return h_func(x_vec, u_vec, return_measurement_names=return_measurement_names)
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
+    def h_gps(self, x_vec, u_vec, return_measurement_names=False):
+        if return_measurement_names:
+            return ['theta', 'x', 'z', 'k']
 
-    # Measurements
-    y_vec = np.array([theta, x, z, k])
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
 
-    # Return measurement
-    return y_vec
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
 
-def h_camera_theta_k(x_vec, u_vec, return_measurement_names=False):
-    if return_measurement_names:
-        return ['optic_flow', 'theta', 'k']
+        # Measurements
+        y_vec = np.array([theta, x, z, k])
 
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+        # Return measurement
+        return y_vec
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
+    def h_camera_theta_k(self, x_vec, u_vec, return_measurement_names=False):
+        if return_measurement_names:
+            return ['optic_flow', 'theta', 'k']
 
-    # Measurements
-    y_vec = np.array([x_dot/z, theta, k])
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
+        else:
+            k = self.k
+            
 
-    # Return measurement
-    return y_vec
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
 
-def h_camera_thetadot_k(x_vec, u_vec, return_measurement_names=False):
-    if return_measurement_names:
-        return ['optic_flow', 'theta_dot', 'k']
+        # Measurements
+        y_vec = np.array([x_dot/z, theta, k])
 
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+        # Return measurement
+        return y_vec
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
+    def h_camera_thetadot_k(self, x_vec, u_vec, return_measurement_names=False):
+        if return_measurement_names:
+            return ['optic_flow', 'theta_dot', 'k']
 
-    # Measurements
-    y_vec = np.array([x_dot/z, theta_dot, k])
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
+        else:
+            k = self.k
+            
 
-    # Return measurement
-    return y_vec
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
 
-def h_camera_imu_notheta(x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
-    if return_measurement_names:
-        return ['optic_flow', 'theta_dot', 'accel_x', 'accel_z']
+        # Measurements
+        y_vec = np.array([x_dot/z, theta_dot, k])
 
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+        # Return measurement
+        return y_vec
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
+    def h_camera_imu_notheta(self, x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
+        if return_measurement_names:
+            return ['optic_flow', 'theta_dot', 'accel_x', 'accel_z']
 
-    # Model for acceleration -- these come from the model
-    accel_x = -k * np.sin(theta) / m
-    accel_z = -g + k * np.cos(theta) / m
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
+        else:
+            k = self.k
+            
 
-    # Measurements
-    y_vec = np.array([x_dot/z, theta_dot, accel_x, accel_z])
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
 
-    # Return measurement
-    return y_vec
+        # Model for acceleration -- these come from the model
+        accel_x = -k * np.sin(theta) / m
+        accel_z = -g + k * np.cos(theta) / m
 
-def h_camera_imu(x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
-    if return_measurement_names:
-        return ['optic_flow', 'theta', 'theta_dot', 'accel_x', 'accel_z']
+        # Measurements
+        y_vec = np.array([x_dot/z, theta_dot, accel_x, accel_z])
 
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+        # Return measurement
+        return y_vec
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
+    def h_camera_imu(self, x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
+        if return_measurement_names:
+            return ['optic_flow', 'theta', 'theta_dot', 'accel_x', 'accel_z']
 
-    # Model for acceleration -- these come from the model
-    accel_x = -k * np.sin(theta) / m
-    accel_z = -g + k * np.cos(theta) / m
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
+        else:
+            k = self.k
+            
 
-    # Measurements
-    y_vec = np.array([x_dot/z, theta, theta_dot, accel_x, accel_z])
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
 
-    # Return measurement
-    return y_vec
+        # Model for acceleration -- these come from the model
+        accel_x = -k * np.sin(theta) / m
+        accel_z = -g + k * np.cos(theta) / m
 
-def h_camera_imu_k(x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
-    if return_measurement_names:
-        return ['optic_flow', 'theta', 'theta_dot', 'accel_x', 'accel_z', 'k']
+        # Measurements
+        y_vec = np.array([x_dot/z, theta, theta_dot, accel_x, accel_z])
 
-    # Extract state variables
-    theta = x_vec[0]
-    theta_dot = x_vec[1]
-    x = x_vec[2]
-    x_dot = x_vec[3]
-    z = x_vec[4]
-    z_dot = x_vec[5]
-    k = x_vec[6]
+        # Return measurement
+        return y_vec
 
-    # Extract control inputs
-    j1 = u_vec[0]
-    j2 = u_vec[1]
+    def h_camera_imu_k(self, x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
+        if return_measurement_names:
+            return ['optic_flow', 'theta', 'theta_dot', 'accel_x', 'accel_z', 'k']
 
-    # Model for acceleration -- these come from the model
-    accel_x = -k * np.sin(theta) / m
-    accel_z = -g + k * np.cos(theta) / m
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
+        else:
+            k = self.k
+            
 
-    # Measurements
-    y_vec = np.array([x_dot/z, theta, theta_dot, accel_x, accel_z, k])
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
 
-    # Return measurement
-    return y_vec
+        # Model for acceleration -- these come from the model
+        accel_x = -k * np.sin(theta) / m
+        accel_z = -g + k * np.cos(theta) / m
+
+        # Measurements
+        y_vec = np.array([x_dot/z, theta, theta_dot, accel_x, accel_z, k])
+
+        # Return measurement
+        return y_vec
 
 ############################################################################################
 # drone simulation
 ############################################################################################
-def simulate_drone(h=h_gps, tsim_length=20, dt=0.1, measurement_names=None, trajectory_shape='squiggle'):
+def simulate_drone(f, h, tsim_length=20, dt=0.1, measurement_names=None,
+                    trajectory_shape='squiggle', setpoint=None, rterm=1e-4):
     """
     trajectory_shape: 'squiggle', 'alternating' 
     """
     # set state and input names
-    state_names = ['theta', 'theta_dot', 'x', 'x_dot', 'z', 'z_dot', 'k']
+    state_names = f(None, None, return_state_names=True) #['theta', 'theta_dot', 'x', 'x_dot', 'z', 'z_dot', 'k']
     input_names = ['j1', 'j2']
     
     # choose the measurement function
@@ -266,53 +319,80 @@ def simulate_drone(h=h_gps, tsim_length=20, dt=0.1, measurement_names=None, traj
     tsim = np.arange(0, tsim_length, step=dt)
     NA = np.zeros_like(tsim)
 
-    if trajectory_shape == 'squiggle':
-        setpoint = {'theta': NA,
-                    'theta_dot': NA,
-                    'x': 2.0*np.cos(2*np.pi*tsim*0.3),  # ground speed changes as a sinusoid
-                    'x_dot': NA,
-                    'z': 0.3*np.sin(2*np.pi*tsim*0.2)+0.5, # altitude also oscillates
-                    'z_dot': NA,
-                    'k': np.ones_like(tsim),
-                   }
-    elif trajectory_shape == 'alternating':
+    if setpoint is None:
+        assert trajectory_shape in ['squiggle', 'alternating', 'random']
 
-        a = 0
-        b = int(len(tsim)/4.)
-        c = int(len(tsim)*2/4.)
-        d = int(len(tsim)*3/4.)
-        e = -1
-        
-        accel_x = np.hstack((2.0*np.cos(2*np.pi*tsim*0.3)[a:b],
-                          0*tsim[b:c],
-                          2.0*np.cos(2*np.pi*tsim*0.3)[c:d],
-                          0*tsim[d:e]))
-        xvel = np.cumsum(accel_x)*dt
-        xpos = 5*np.cumsum(xvel)*dt
-        if len(xpos) > len(tsim):
-            xpos = xpos[0:len(tsim)]
-        if len(xpos) < len(tsim):
-            xpos = np.hstack((xpos, [xpos[-1]]*(len(tsim)-len(xpos))))
-        
-        accel_z = np.hstack((0.1*np.sin(2*np.pi*tsim*0.2)[a:b],
-                          0*tsim[b:c],
-                          -0.1*np.sin(2*np.pi*tsim*0.2)[c:d],
-                          0*tsim[d:e]))
-        zvel = np.cumsum(accel_z)*dt
-        zpos = 5*np.cumsum(zvel)*dt + 1
-        if len(zpos) > len(tsim):
-            zpos = zpos[0:len(tsim)]
-        if len(zpos) < len(tsim):
-            zpos = np.hstack((zpos, [zpos[-1]]*(len(tsim)-len(zpos))))
+        if trajectory_shape == 'squiggle':
+            setpoint = {'theta': NA,
+                        'theta_dot': NA,
+                        'x': 2.0*np.cos(2*np.pi*tsim*0.3),  # ground speed changes as a sinusoid
+                        'x_dot': NA,
+                        'z': 0.3*np.sin(2*np.pi*tsim*0.2)+0.5, # altitude also oscillates
+                        'z_dot': NA,
+                        'k': np.ones_like(tsim),
+                       }
+        elif trajectory_shape == 'alternating':
 
-        setpoint = {'theta': NA,
-                    'theta_dot': NA,
-                    'x': xpos,  
-                    'x_dot': NA,
-                    'z': zpos, 
-                    'z_dot': NA,
-                    'k': np.ones_like(tsim),
-                   }
+            a = 0
+            b = int(len(tsim)/4.)
+            c = int(len(tsim)*2/4.)
+            d = int(len(tsim)*3/4.)
+            e = -1
+            
+            accel_x = np.hstack((2.0*np.cos(2*np.pi*tsim*0.3)[a:b],
+                              0*tsim[b:c],
+                              2.0*np.cos(2*np.pi*tsim*0.3)[c:d],
+                              0*tsim[d:e]))
+            xvel = np.cumsum(accel_x)*dt
+            xpos = 5*np.cumsum(xvel)*dt
+            if len(xpos) > len(tsim):
+                xpos = xpos[0:len(tsim)]
+            if len(xpos) < len(tsim):
+                xpos = np.hstack((xpos, [xpos[-1]]*(len(tsim)-len(xpos))))
+            
+            accel_z = np.hstack((0.1*np.sin(2*np.pi*tsim*0.2)[a:b],
+                              0*tsim[b:c],
+                              -0.1*np.sin(2*np.pi*tsim*0.2)[c:d],
+                              0*tsim[d:e]))
+            zvel = np.cumsum(accel_z)*dt
+            zpos = 5*np.cumsum(zvel)*dt + 1
+            if len(zpos) > len(tsim):
+                zpos = zpos[0:len(tsim)]
+            if len(zpos) < len(tsim):
+                zpos = np.hstack((zpos, [zpos[-1]]*(len(tsim)-len(zpos))))
+
+            setpoint = {'theta': NA,
+                        'theta_dot': NA,
+                        'x': xpos,  
+                        'x_dot': NA,
+                        'z': zpos, 
+                        'z_dot': NA,
+                        'k': np.ones_like(tsim),
+                       }
+        elif trajectory_shape == 'random':
+            tsim_length_half = tsim_length/2
+            tsim = np.arange(0, tsim_length_half, step=dt)
+
+            x_curve_1 = generate_smooth_curve(tsim, method='spline', smoothness=0.15, amplitude=3.0, seed=42)
+            z_curve_1 = generate_smooth_curve(tsim, method='spline', smoothness=0.15, amplitude=3.0, seed=24)
+
+            x_curve_2 = generate_smooth_curve(tsim, method='spline', smoothness=0.02, amplitude=3.0, seed=42)
+            z_curve_2 = generate_smooth_curve(tsim, method='spline', smoothness=0.02, amplitude=3.0, seed=24)
+
+            tsim = np.arange(0, tsim_length, step=dt)
+            tsim_length = tsim_length*2
+            NA = np.zeros_like(tsim)
+            setpoint = {'theta': NA,
+                        'theta_dot': NA,
+                        'x': np.hstack((x_curve_1,x_curve_2)),  
+                        'x_dot': NA,
+                        'z': np.hstack((z_curve_1,z_curve_2)) + 5, 
+                        'z_dot': NA,
+                        'k': np.ones_like(tsim),
+                       }
+
+    if 'k' not in state_names:
+        del setpoint['k']
 
     # Update the simulator set-point
     simulator.update_dict(setpoint, name='setpoint')
@@ -326,7 +406,7 @@ def simulate_drone(h=h_gps, tsim_length=20, dt=0.1, measurement_names=None, traj
     simulator.mpc.set_objective(mterm=cost, lterm=cost)  # objective function
 
     # Set input penalty: make this small for accurate state tracking
-    simulator.mpc.set_rterm(j1=1e-4, j2=1e-4)
+    simulator.mpc.set_rterm(j1=rterm, j2=rterm)
 
     # Set bounds on states and controls
     simulator.mpc.bounds['lower', '_x', 'theta'] = -np.pi/4
@@ -339,3 +419,76 @@ def simulate_drone(h=h_gps, tsim_length=20, dt=0.1, measurement_names=None, traj
 
     # Return
     return t_sim, x_sim, u_sim, y_sim, simulator
+
+###############################################################################################
+# Misc helper functions
+###############################################################################################
+
+# From Claude
+def generate_smooth_curve(t_points, method='spline', smoothness=0.1, amplitude=1.0, seed=None):
+    """
+    Generate a smooth random curve as a function of time points.
+    
+    Parameters:
+    -----------
+    t_points : array-like
+        Time points where the curve should be evaluated
+    method : str, default='spline'
+        Method to use: 'spline', 'sine_sum', or 'noise_filter'
+    smoothness : float, default=0.1
+        Controls curve smoothness (interpretation varies by method)
+    amplitude : float, default=1.0
+        Maximum amplitude of the curve
+    seed : int, optional
+        Random seed for reproducibility
+    
+    Returns:
+    --------
+    numpy.ndarray
+        Smooth curve values at the given time points
+    """
+    
+    if seed is not None:
+        np.random.seed(seed)
+    
+    t_points = np.array(t_points)
+    
+    if method == 'spline':
+        # Generate random control points and interpolate with splines
+        n_control = max(5, int(len(t_points) * smoothness))
+        control_t = np.linspace(t_points[0], t_points[-1], n_control)
+        control_y = np.random.normal(0, amplitude/3, n_control) # < I modified, used to  be uniform(-amp, amp)
+        
+        # Use cubic spline interpolation
+        spline = interpolate.CubicSpline(control_t, control_y)
+        return spline(t_points)
+    
+    elif method == 'sine_sum':
+        # Sum of random sine waves with different frequencies
+        n_harmonics = max(3, int(20 * smoothness))
+        result = np.zeros_like(t_points, dtype=float)
+        
+        for i in range(n_harmonics):
+            freq = np.random.exponential(1.0 / smoothness)
+            phase = np.random.uniform(0, 2 * np.pi)
+            amp = np.random.uniform(0, amplitude) / (i + 1)  # Decay higher frequencies
+            result += amp * np.sin(2 * np.pi * freq * t_points + phase)
+        
+        return result
+    
+    elif method == 'noise_filter':
+        # Generate noise and apply low-pass filtering
+        from scipy.signal import butter, filtfilt
+        
+        # Generate random noise
+        noise = np.random.normal(0, amplitude, len(t_points))
+        
+        # Apply low-pass filter
+        nyquist = 0.5 * len(t_points) / (t_points[-1] - t_points[0])
+        cutoff = nyquist * smoothness
+        b, a = butter(3, cutoff / nyquist, btype='low')
+        
+        return filtfilt(b, a, noise)
+    
+    else:
+        raise ValueError("Method must be 'spline', 'sine_sum', or 'noise_filter'")
