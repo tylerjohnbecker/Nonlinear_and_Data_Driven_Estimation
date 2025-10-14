@@ -103,7 +103,7 @@ class F(object):
         # combined dynamics
         x_dot_vec = f0_contribution + f1_contribution + f2_contribution
         
-        if k is None:
+        if self.k is None:
             return x_dot_vec
         else:
             return x_dot_vec[0:6]
@@ -221,8 +221,8 @@ class H(object):
         j2 = u_vec[1]
 
         # Model for acceleration -- these come from the model
-        accel_x = -k * np.sin(theta) / m
-        accel_z = -g + k * np.cos(theta) / m
+        accel_x = -k*np.sin(theta)*j2 / m
+        accel_z = -g + k*np.cos(theta)*j2 / m
 
         # Measurements
         y_vec = np.array([x_dot/z, theta_dot, accel_x, accel_z])
@@ -252,8 +252,8 @@ class H(object):
         j2 = u_vec[1]
 
         # Model for acceleration -- these come from the model
-        accel_x = -k * np.sin(theta) / m
-        accel_z = -g + k * np.cos(theta) / m
+        accel_x = -k*np.sin(theta)*j2 / m
+        accel_z = -g + k*np.cos(theta)*j2 / m
 
         # Measurements
         y_vec = np.array([x_dot/z, theta, theta_dot, accel_x, accel_z])
@@ -283,11 +283,42 @@ class H(object):
         j2 = u_vec[1]
 
         # Model for acceleration -- these come from the model
-        accel_x = -k * np.sin(theta) / m
-        accel_z = -g + k * np.cos(theta) / m
+        accel_x = -k*np.sin(theta)*j2 / m
+        accel_z = -g + k*np.cos(theta)*j2 / m
 
         # Measurements
         y_vec = np.array([x_dot/z, theta, theta_dot, accel_x, accel_z, k])
+
+        # Return measurement
+        return y_vec
+
+    def h_all(self, x_vec, u_vec, g=g, m=m, L=L, return_measurement_names=False):
+        if return_measurement_names:
+            return ['x', 'z', 'optic_flow', 'theta', 'theta_dot', 'accel_x', 'accel_z', 'k']
+
+        # Extract state variables
+        theta = x_vec[0]
+        theta_dot = x_vec[1]
+        x = x_vec[2]
+        x_dot = x_vec[3]
+        z = x_vec[4]
+        z_dot = x_vec[5]
+        if self.k is None:
+            k = x_vec[6]
+        else:
+            k = self.k
+            
+
+        # Extract control inputs
+        j1 = u_vec[0]
+        j2 = u_vec[1]
+
+        # Model for acceleration -- these come from the model
+        accel_x = -k*np.sin(theta)*j2 / m
+        accel_z = -g + k*np.cos(theta)*j2 / m
+
+        # Measurements
+        y_vec = np.array([x, z, x_dot/z, theta, theta_dot, accel_x, accel_z, k])
 
         # Return measurement
         return y_vec
@@ -320,7 +351,7 @@ def simulate_drone(f, h, tsim_length=20, dt=0.1, measurement_names=None,
     NA = np.zeros_like(tsim)
 
     if setpoint is None:
-        assert trajectory_shape in ['squiggle', 'alternating', 'random']
+        assert trajectory_shape in ['squiggle', 'alternating', 'random', 'constant_thetadot']
 
         if trajectory_shape == 'squiggle':
             setpoint = {'theta': NA,
@@ -369,24 +400,45 @@ def simulate_drone(f, h, tsim_length=20, dt=0.1, measurement_names=None,
                         'z_dot': NA,
                         'k': np.ones_like(tsim),
                        }
+        elif trajectory_shape == 'constant_thetadot':
+            freq = 0.15
+            amp = 0.15
+            theta_dot = amp*np.sign(np.cos(tsim*2*np.pi*freq))
+
+            zpos = np.ones_like(theta_dot)*3
+
+            setpoint = {'theta': NA,
+                        'theta_dot': theta_dot,
+                        'x': NA,  
+                        'x_dot': NA,
+                        'z': zpos, 
+                        'z_dot': NA,
+                        'k': np.ones_like(tsim),
+                       }
+
         elif trajectory_shape == 'random':
-            tsim_length_half = tsim_length/2
-            tsim = np.arange(0, tsim_length_half, step=dt)
+            tsim_length_part = tsim_length/3.
+            tsim = np.arange(0, tsim_length_part, step=dt)
 
             x_curve_1 = generate_smooth_curve(tsim, method='spline', smoothness=0.15, amplitude=3.0, seed=42)
             z_curve_1 = generate_smooth_curve(tsim, method='spline', smoothness=0.15, amplitude=3.0, seed=24)
 
-            x_curve_2 = generate_smooth_curve(tsim, method='spline', smoothness=0.02, amplitude=3.0, seed=42)
-            z_curve_2 = generate_smooth_curve(tsim, method='spline', smoothness=0.02, amplitude=3.0, seed=24)
+            x_curve_2 = generate_smooth_curve(tsim, method='spline', smoothness=0.04, amplitude=5.0, seed=3)
+            z_curve_2 = generate_smooth_curve(tsim, method='spline', smoothness=0.04, amplitude=5.0, seed=3)
 
-            tsim = np.arange(0, tsim_length, step=dt)
-            tsim_length = tsim_length*2
+            accel_x = 0.1*np.ones_like(x_curve_1)
+            xdot = np.cumsum(accel_x)*dt
+            x_curve_3 = np.cumsum(xdot)*dt
+            z_curve_3 = 4*np.ones_like(x_curve_1)
+
+            tsim = np.arange(0, len(tsim)*3*dt, step=dt)
+            tsim_length = len(tsim)*3*dt
             NA = np.zeros_like(tsim)
             setpoint = {'theta': NA,
                         'theta_dot': NA,
-                        'x': np.hstack((x_curve_1,x_curve_2)),  
+                        'x': np.hstack((x_curve_1,x_curve_2,x_curve_3)),  
                         'x_dot': NA,
-                        'z': np.hstack((z_curve_1,z_curve_2)) + 5, 
+                        'z': np.hstack((z_curve_1,z_curve_2,z_curve_3)) + 5, 
                         'z_dot': NA,
                         'k': np.ones_like(tsim),
                        }
@@ -398,9 +450,15 @@ def simulate_drone(f, h, tsim_length=20, dt=0.1, measurement_names=None,
     simulator.update_dict(setpoint, name='setpoint')
 
     # Define MPC cost function: penalize the squared error between the setpoint for g and the true g
-    cost_x = (simulator.model.x['x'] - simulator.model.tvp['x_set']) ** 2
-    cost_z = (simulator.model.x['z'] - simulator.model.tvp['z_set']) ** 2
-    cost = cost_x + cost_z 
+    if trajectory_shape in ['squiggle', 'alternating', 'random']:
+        cost_x = (simulator.model.x['x'] - simulator.model.tvp['x_set']) ** 2
+        cost_z = (simulator.model.x['z'] - simulator.model.tvp['z_set']) ** 2
+        cost = cost_x + cost_z 
+    elif trajectory_shape in ['constant_thetadot',]:
+        cost_theta_dot = (simulator.model.x['theta_dot'] - simulator.model.tvp['theta_dot_set']) ** 2
+        cost_z = (simulator.model.x['z'] - simulator.model.tvp['z_set']) ** 2
+        cost = cost_theta_dot + cost_z 
+
 
     # Set cost function
     simulator.mpc.set_objective(mterm=cost, lterm=cost)  # objective function
@@ -449,7 +507,7 @@ def generate_smooth_curve(t_points, method='spline', smoothness=0.1, amplitude=1
     """
     
     if seed is not None:
-        np.random.seed(seed)
+        rng = np.random.default_rng(seed)
     
     t_points = np.array(t_points)
     
